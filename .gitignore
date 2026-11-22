@@ -1,0 +1,16 @@
+node_modules/
+.pi/
+.env
+.env.*
+!.env.example
+config.json
+*.local.json
+publisher-token
+*token*
+*credential*
+*.pem
+*.key
+deploy/server.yml
+*.db
+*.db-*
+coverage/
