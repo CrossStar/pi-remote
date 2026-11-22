@@ -59,6 +59,14 @@ export class Queue {
   }
 }
 
+const QUESTION_TOOLS = new Set(['ask_user_question', 'ask_user_question_async', 'request_user_input', 'request_user_input_async']);
+
+export function isQuestionTool(name: string) {
+  // Namespace separators: functions.name, namespace:name, namespace/name, mcp__server__name.
+  // Single underscores remain part of the name; never match arbitrary suffixes.
+  return QUESTION_TOOLS.has(name.split(/__|[.:/]/).at(-1) ?? '');
+}
+
 export default function (pi: ExtensionAPI) {
   let cfg: ReturnType<typeof config>;
   let savedEnabled = true;
@@ -77,8 +85,24 @@ export default function (pi: ExtensionAPI) {
   let started: number | undefined;
   let excerpt = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const clear = () => { clearTimeout(timer); timer = undefined; };
+  let uiPending = false;
+  const questionCalls = new Set<string>();
+  let notified = false;
+  const clear = () => {
+    clearTimeout(timer); timer = undefined;
+    uiPending = false; questionCalls.clear(); notified = false;
+  };
   const send = (text: string) => enabled && !!queue?.enqueue(text);
+  const updatePrompt = () => {
+    if (!uiPending && questionCalls.size === 0) { clear(); return; }
+    if (!enabled || notified || timer !== undefined) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      notified = true;
+      send('Pi 正在等待你的交互输入，请返回终端查看。');
+    }, 1500);
+    timer.unref?.();
+  };
   pi.on('agent_start', () => { if (started === undefined) { started = Date.now(); excerpt = ''; } });
   pi.on('message_end', (event) => {
     if (started !== undefined && cfg?.excerpt && event.message.role === 'assistant') {
@@ -91,12 +115,19 @@ export default function (pi: ExtensionAPI) {
     send(`${event.aborted ? '运行已中止' : '已就绪，可继续输入'}（${Math.round((Date.now() - started) / 1000)} 秒）。这不代表任务成功。${excerpt ? '\n' + excerpt : ''}`);
     started = undefined; excerpt = '';
   });
-  pi.on('ui_prompt_start', () => {
-    clear();
-    timer = setTimeout(() => { timer = undefined; send('Pi 正在等待你的交互输入，请返回终端查看。'); }, 1500);
-    timer.unref?.();
+  // UI events describe one coalesced span; tool events have independent call IDs.
+  // Keep one notification until every overlapping source has ended.
+  pi.on('ui_prompt_start', () => { if (enabled) { uiPending = true; updatePrompt(); } });
+  pi.on('ui_prompt_end', () => { uiPending = false; updatePrompt(); });
+  pi.on('tool_execution_start', event => {
+    if (enabled && isQuestionTool(event.toolName)) {
+      questionCalls.add(event.toolCallId);
+      updatePrompt();
+    }
   });
-  pi.on('ui_prompt_end', clear);
+  pi.on('tool_execution_end', event => {
+    if (questionCalls.delete(event.toolCallId)) updatePrompt();
+  });
   pi.on('session_compact_failed', event => { send(event.aborted ? '上下文压缩已取消。' : '上下文压缩失败，请返回终端检查。'); });
   pi.on('session_shutdown', () => { enabled = false; clear(); queue?.close(); started = undefined; excerpt = ''; });
   pi.registerCommand('push', {
